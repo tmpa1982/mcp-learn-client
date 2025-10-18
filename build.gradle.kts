@@ -3,6 +3,7 @@ val anthropicVersion = "2.9.0"
 
 plugins {
     kotlin("jvm") version "2.2.20"
+    application
 }
 
 group = "net.tmpa.mcp.learn"
@@ -20,8 +21,8 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
-tasks.test {
-    useJUnitPlatform()
+application {
+    mainClass.set("MainKt")
 }
 
 tasks.jar {
@@ -30,7 +31,13 @@ tasks.jar {
     }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
+    exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
 }
+
+tasks.test {
+    useJUnitPlatform()
+}
+
 
 kotlin {
     jvmToolchain(24)
