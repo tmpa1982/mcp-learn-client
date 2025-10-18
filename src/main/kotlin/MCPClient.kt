@@ -22,7 +22,7 @@ import kotlinx.serialization.json.JsonObject
 class MCPClient : AutoCloseable {
     val endpoint = "https://tmpa-ai-foundry.cognitiveservices.azure.com/"
     val azureAiClient: OpenAIClient = OpenAIClientBuilder()
-        .credential(AzureKeyCredential(""))
+        .credential(AzureKeyCredential(System.getenv("AZURE_OPENAI_KEY") ?: throw IllegalStateException("AZURE_OPENAI_KEY environment variable is not set")))
         .endpoint(endpoint)
         .buildClient()
 
