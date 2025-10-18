@@ -1,10 +1,11 @@
-import com.anthropic.client.okhttp.AnthropicOkHttpClient
 import com.anthropic.core.JsonValue
-import com.anthropic.models.messages.MessageCreateParams
-import com.anthropic.models.messages.MessageParam
-import com.anthropic.models.messages.Model
 import com.anthropic.models.messages.Tool
 import com.anthropic.models.messages.ToolUnion
+import com.azure.ai.openai.OpenAIClient
+import com.azure.ai.openai.OpenAIClientBuilder
+import com.azure.ai.openai.models.*
+import com.azure.core.credential.AzureKeyCredential
+import com.azure.core.util.BinaryData
 import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.modelcontextprotocol.kotlin.sdk.Implementation
@@ -16,12 +17,18 @@ import kotlinx.io.asSink
 import kotlinx.io.asSource
 import kotlinx.io.buffered
 import kotlinx.serialization.json.JsonObject
-import kotlin.jvm.optionals.getOrNull
+
 
 class MCPClient : AutoCloseable {
-    private val anthropic = AnthropicOkHttpClient.fromEnv()
+    val endpoint = "https://tmpa-ai-foundry.cognitiveservices.azure.com/"
+    val azureAiClient: OpenAIClient = OpenAIClientBuilder()
+        .credential(AzureKeyCredential(""))
+        .endpoint(endpoint)
+        .buildClient()
+
     private val mcp: Client = Client(clientInfo = Implementation(name = "mcp-client-cli", version = "1.0.0"))
     private lateinit var tools: List<ToolUnion>
+    private lateinit var openaiTools: List<FunctionDefinition>
 
     override fun close() {
         runBlocking {
@@ -65,6 +72,17 @@ class MCPClient : AutoCloseable {
                         .build()
                 )
             }
+
+            openaiTools = toolsResult.tools.map { tool ->
+                val func = FunctionDefinition(tool.name)
+                func.setDescription(tool.description)
+                val params = mapOf(
+                    "type" to tool.inputSchema.type,
+                    "properties" to tool.inputSchema.properties,
+                    "required" to tool.inputSchema.required
+                )
+                func.setParameters(BinaryData.fromObject(params))
+            }
             println("Connected to server with tools: ${tools.joinToString(", ") { it.tool().get().name() }}")
         } catch (e: Exception) {
             println("Failed to connect to MCP server: $e")
@@ -72,61 +90,49 @@ class MCPClient : AutoCloseable {
         }
     }
 
-    private val messageParamsBuilder: MessageCreateParams.Builder = MessageCreateParams.builder()
-        .model(Model.CLAUDE_SONNET_4_5)
-        .maxTokens(1024)
-
     suspend fun processQuery(query: String): String {
-        val messages = mutableListOf(
-            MessageParam.builder()
-                .role(MessageParam.Role.USER)
-                .content(query)
-                .build()
+        val messages = mutableListOf<ChatRequestMessage>(
+            ChatRequestUserMessage(query)
         )
 
-        val response = anthropic.messages().create(
-            messageParamsBuilder
-                .messages(messages)
-                .tools(tools)
-                .build()
-        )
+        val deploymentName = "gpt-5-mini"
+        val options = ChatCompletionsOptions(messages)
+        options.setMaxCompletionTokens(16384)
+        options.setFunctions(openaiTools)
 
+        val completions = azureAiClient.getChatCompletions(deploymentName, options)
         val finalText = mutableListOf<String>()
-        response.content().forEach { content ->
-            when {
-                content.isText() -> finalText.add(content.text().getOrNull()?.text() ?: "")
-
-                content.isToolUse() -> {
-                    val toolName = content.toolUse().get().name()
-                    val toolArgs =
-                        content.toolUse().get()._input().convert(object : TypeReference<Map<String, JsonValue>>() {})
+        completions.choices.forEach { choice ->
+            when (choice.message.role) {
+                ChatRole.USER -> {
+                    finalText.add(choice.message.content)
+                }
+                ChatRole.FUNCTION -> {
+                    val toolName = choice.message.functionCall.name
+                    val toolArgs = choice.message.functionCall?.arguments
+                        ?.let {
+                            val mapper = ObjectMapper()
+                            mapper.readValue(it, object : TypeReference<Map<String, JsonValue>>() {})
+                        } ?: emptyMap()
 
                     val result = mcp.callTool(
-                        name = toolName,
-                        arguments = toolArgs ?: emptyMap()
+                        name = toolName ?: "",
+                        arguments = toolArgs
                     )
                     finalText.add("[Calling tool $toolName with args $toolArgs]")
 
                     messages.add(
-                        MessageParam.builder()
-                            .role(MessageParam.Role.USER)
-                            .content(
-                                """
-                                "type": "tool_result",
-                                "tool_name": $toolName,
-                                "result": ${result?.content?.joinToString("\n") { (it as TextContent).text ?: "" }}
-                            """.trimIndent()
-                            )
-                            .build()
+                        ChatRequestUserMessage("""
+                            "type": "tool_result",
+                            "tool_name": $toolName,
+                            "result": ${result?.content?.joinToString("\n") { (it as TextContent).text ?: "" }}
+                        """.trimIndent())
                     )
 
-                    val aiResponse = anthropic.messages().create(
-                        messageParamsBuilder
-                            .messages(messages)
-                            .build()
-                    )
-
-                    finalText.add(aiResponse.content().first().text().getOrNull()?.text() ?: "")
+                    val toolOptions = ChatCompletionsOptions(messages)
+                    toolOptions.setMaxCompletionTokens(16384)
+                    val response = azureAiClient.getChatCompletions(deploymentName, toolOptions)
+                    finalText.add(response.choices.single().message.content)
                 }
             }
         }

@@ -14,6 +14,8 @@ repositories {
 
 dependencies {
     implementation("io.modelcontextprotocol:kotlin-sdk:${mcpVersion}")
+    implementation("com.azure:azure-ai-openai:1.0.0-beta.16")
+    implementation("com.azure:azure-identity:1.18.1")
     implementation("com.anthropic:anthropic-java:${anthropicVersion}")
     testImplementation(kotlin("test"))
 }
